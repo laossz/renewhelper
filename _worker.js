@@ -1,5 +1,5 @@
 /**
- * Cloudflare Worker: RenewHelper (v1.4.2)
+ * Cloudflare Worker: RenewHelper (v1.4.3)
  * Author: LOSTFREE
  * Features: Multi-Channel Notify, Import/Export, Channel Test, Bilingual UI, Precise ICS Alarm
  * added: sort, filter v1.3.4
@@ -11,9 +11,10 @@
  * added: add github actions deploy v1.4.0
  * modified: mobile layout v1.4.1
  * modified: add gotify/ntfy channels and refactor setup page v1.4.2
+ * modified: fix previewDate logic v1.4.3
  */
 
-const APP_VERSION = "v1.4.2";
+const APP_VERSION = "v1.4.3";
 
 // ==========================================
 // 1. Core Logic (Lunar & Calc)
@@ -2805,29 +2806,60 @@ const HTML = `<!DOCTYPE html>
                     { label: 'Pacific/Auckland (新西兰奥克兰)', value: 'Pacific/Auckland' }
                 ];
 
-
                 const previewData = computed(() => {
                     const { lastRenewDate, intervalDays, cycleUnit, useLunar } = form.value;
                     if (!lastRenewDate || !intervalDays) return null;
+                    
                     try {
-                        const date = parseYMD(lastRenewDate);
-                        let nextDate;
+                        let nextDateUTC;
+
+                        // --- 步骤 1: 计算“下一次到期日” (纯日期运算，使用 UTC 避免偏差) ---
                         if (useLunar) {
-                            const l = LUNAR.solar2lunar(date.getFullYear(), date.getMonth() + 1, date.getDate());
+                            const p = lastRenewDate.split('-');
+                            const y = parseInt(p[0]), m = parseInt(p[1]), d = parseInt(p[2]);
+                            const l = LUNAR.solar2lunar(y, m, d);
                             const nl = frontendCalc.addPeriod({ year: l.year, month: l.month, day: l.day, isLeap: l.isLeap }, intervalDays, cycleUnit);
                             const ns = frontendCalc.l2s(nl);
-                            nextDate = new Date(Date.UTC(ns.year, ns.month - 1, ns.day));
+                            nextDateUTC = new Date(Date.UTC(ns.year, ns.month - 1, ns.day));
                         } else {
-                            nextDate = new Date(date);
-                            if (cycleUnit === 'day') nextDate.setDate(nextDate.getDate() + intervalDays);
-                            else if (cycleUnit === 'month') nextDate.setMonth(nextDate.getMonth() + intervalDays);
-                            else if (cycleUnit === 'year') nextDate.setFullYear(nextDate.getFullYear() + intervalDays);
+                            const p = lastRenewDate.split('-');
+                            nextDateUTC = new Date(Date.UTC(+p[0], +p[1] - 1, +p[2]));
+
+                            if (cycleUnit === 'day') nextDateUTC.setUTCDate(nextDateUTC.getUTCDate() + intervalDays);
+                            else if (cycleUnit === 'month') nextDateUTC.setUTCMonth(nextDateUTC.getUTCMonth() + intervalDays);
+                            else if (cycleUnit === 'year') nextDateUTC.setUTCFullYear(nextDateUTC.getUTCFullYear() + intervalDays);
                         }
-                        const nextStr = nextDate.toISOString().split('T')[0];
-                        const diff = Math.ceil((nextDate - parseYMD(getLocalToday())) / (1000 * 3600 * 24));
-                        const diffStr = (lang.value === 'zh' ? '距今 ' : 'Today ') + (diff > 0 ? '+' : '') + diff + ' ' + (lang.value === 'zh' ? '天' : 'Days');
+                        const nextStr = nextDateUTC.toISOString().split('T')[0];
+
+                        // --- 步骤 2: 获取“用户偏好时区”的“今天” ---
+                        let todayInUserTzStr;
+                        try {
+                            const userTz = settings.value.timezone || 'UTC';
+                            // 使用 Intl 格式化出用户时区的 YYYY-MM-DD
+                            const fmt = new Intl.DateTimeFormat('en-CA', { 
+                                timeZone: userTz, 
+                                year: 'numeric', month: '2-digit', day: '2-digit' 
+                            });
+                            todayInUserTzStr = fmt.format(new Date());
+                        } catch (e) {
+                            // 降级处理
+                            todayInUserTzStr = new Date().toISOString().split('T')[0];
+                        }
+
+                        // --- 步骤 3: 计算差值 (统一转成 UTC 0点相减，消除时分秒干扰) ---
+                        const pToday = todayInUserTzStr.split('-');
+                        const todayUTC = new Date(Date.UTC(+pToday[0], +pToday[1]-1, +pToday[2]));
+
+                        // 计算毫秒差 -> 天数
+                        const diff = Math.round((nextDateUTC - todayUTC) / (1000 * 3600 * 24));
+                        
+                        const diffStr = (lang.value === 'zh' ? '距今 ' : 'Due in ') + (diff > 0 ? '+' : '') + diff + ' ' + (lang.value === 'zh' ? '天' : 'Days');
+                        
                         return { date: nextStr, diff: diffStr };
-                    } catch (e) { return null; }
+                    } catch (e) { 
+                        console.error(e);
+                        return null; 
+                    }
                 });
 
                 const pagedList = computed(() => {
